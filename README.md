@@ -23,5 +23,5 @@ Ensure you have a user script manager extension installed on your desktop browse
 
 ---
 
-## Configuration Note ⚙️
+## Configuration Note:
 The script operates automatically on active windows based on standard layout selectors. To prevent background loop memory clashes, refresh your active browser session if structural changes occur on the live delivery dashboard page.
