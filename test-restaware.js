@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Swiggy Zomato Order Forwarder (Restaurant-Aware Master)
+// @name         Swiggy Zomato Order Forwarder (Restaurant-Aware Dual-Format Master Fix)
 // @namespace    http://tampermonkey.net/
-// @version      2.9
-// @description  Skip Kachori Sabzi renaming override strictly for Vyanjan orders while maintaining duplicate item line clubbing.
+// @version      2.8.1
+// @description  Simultaneously extract inline brackets/parentheses [X Pcs]/(X Pcs) and subscript text on both platforms.
 // @author       Adrika
 // @match        *://*.partner.swiggy.com/*
 // @match        *://*.zomato.com/*
@@ -16,11 +16,10 @@ const STORAGE_KEY = "whatsapp_pending_order_msg";
 const PROCESSED_ORDERS = new Set();
 
 // =========================================================================
-// RESTAURANT-AWARE MERGING & CASING ENGINE
+// UNIFIED MERGING & CASING ENGINE
 // =========================================================================
-function compileAndMergeItems(rawItemsList, restaurantName) {
+function compileAndMergeItems(rawItemsList) {
     const mergedMap = new Map();
-    const isVyanjan = /vyanjan/i.test(restaurantName);
 
     rawItemsList.forEach(item => {
         let cleanName = item.name.trim();
@@ -37,12 +36,11 @@ function compileAndMergeItems(rawItemsList, restaurantName) {
         // Convert to crisp Title Case
         cleanName = cleanName.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
 
-        // Apply explicit keyword clubbing rule ONLY if it is NOT a Vyanjan order
-        if (!isVyanjan && /kachori|kochuri/i.test(cleanName)) {
+        // Apply explicit keyword clubbing rule
+        if (/kachori|kochuri/i.test(cleanName)) {
             cleanName = "Kachori Sabzi";
         }
 
-        // Combine quantities together if items resolve to the exact same name string
         if (mergedMap.has(cleanName)) {
             mergedMap.set(cleanName, mergedMap.get(cleanName) + quantity);
         } else {
@@ -60,7 +58,7 @@ function compileAndMergeItems(rawItemsList, restaurantName) {
 }
 
 // =========================================================================
-// UNIVERSAL CONTENT PARSERS
+// UNIVERSAL DUAL-FORMAT CONTENT PARSERS
 // =========================================================================
 function parseZomatoCard(card) {
     const idSpan = card.querySelector('div.css-16jdd3h span font-weight, [class*="sc-jzJRlG"]');
@@ -68,10 +66,6 @@ function parseZomatoCard(card) {
 
     const orderId = idSpan.textContent.replace(/[^0-9]/g, '').trim();
     if (!orderId || orderId.length < 4 || PROCESSED_ORDERS.has(orderId)) return null;
-
-    // Extract the active Restaurant Title from the card header block
-    const outletNameEl = card.querySelector('.css-1cyrfy9') || card.querySelector('[class*="restaurantName" i]');
-    const restaurantName = outletNameEl ? outletNameEl.textContent.trim() : "";
 
     const rawItems = [];
     const itemRows = card.querySelectorAll('.css-1gq83dh, .css-pnn23e, .css-68hfpx, div[height="100%"]');
@@ -86,14 +80,14 @@ function parseZomatoCard(card) {
 
             let multiplierFound = 1;
 
-            // CHECK 1: Inline bracket check rule (e.g. "Peas Kachori [3 Pieces]")
-            const inlineBracketMatch = rawName.match(/\[(\d+)\s*pieces?\]/i);
-            // CHECK 2: Subscript context check rule (e.g. "Quantity: 8 Pieces")
+            // CHECK TYPE 1: Inline bracket/parentheses check rule
+            const inlineMatch = rawName.match(/[\[\(](\d+)\s*(?:pieces?|pcs?)[\]\)]/i);
+            // CHECK TYPE 2: Subscript context check rule
             const fullRowText = row.closest('div')?.textContent || row.textContent || "";
             const subscriptMatch = fullRowText.match(/Quantity:\s*(\d+)/i);
 
-            if (inlineBracketMatch) {
-                multiplierFound = parseInt(inlineBracketMatch[1], 10);
+            if (inlineMatch) {
+                multiplierFound = parseInt(inlineMatch[1], 10);
             } else if (subscriptMatch) {
                 multiplierFound = parseInt(subscriptMatch[1], 10);
             }
@@ -106,7 +100,7 @@ function parseZomatoCard(card) {
         }
     });
 
-    const finalMergedItems = compileAndMergeItems(rawItems, restaurantName);
+    const finalMergedItems = compileAndMergeItems(rawItems);
     return finalMergedItems.length > 0 ? { orderId, platform: 'zomato', items: finalMergedItems } : null;
 }
 
@@ -116,9 +110,6 @@ function parseSwiggyCard(card) {
 
     const orderId = idEl.textContent.replace(/[^0-9]/g, '').trim();
     if (!orderId || PROCESSED_ORDERS.has(orderId)) return null;
-
-    // Fallback or explicit store check placeholder for Swiggy profiles if needed
-    const restaurantName = "SwiggyOrder";
 
     const rawItems = [];
     const nameElements = card.querySelectorAll('[data-testid="item_name"]');
@@ -131,16 +122,17 @@ function parseSwiggyCard(card) {
             let quantity = qtyMatch ? parseInt(qtyMatch[1], 10) : 1;
             let rawName = nameEl.textContent.trim();
 
-            const inlineBracketMatch = rawName.match(/\[(\d+)\s*pieces?\]/i);
-            if (inlineBracketMatch) {
-                quantity = quantity * parseInt(inlineBracketMatch[1], 10);
+            // CRITICAL FIX: Look for [8 Pieces], (8 Pcs), [4 pcs], etc.
+            const inlineMatch = rawName.match(/[\[\(](\d+)\s*(?:pieces?|pcs?)[\]\)]/i);
+            if (inlineMatch) {
+                quantity = quantity * parseInt(inlineMatch[1], 10);
             }
 
             rawItems.push({ name: rawName, quantity: quantity });
         }
     });
 
-    const finalMergedItems = compileAndMergeItems(rawItems, restaurantName);
+    const finalMergedItems = compileAndMergeItems(rawItems);
     return finalMergedItems.length > 0 ? { orderId, platform: 'swiggy', items: finalMergedItems } : null;
 }
 
@@ -179,7 +171,7 @@ function dispatchToWhatsApp(orderData) {
         msg += `${item.quantity} ${item.name}\n`;
     });
 
-    console.log(`%c[Forwarder] Sending Dynamic Ticket:\n${msg.trim()}`, "color: #00ff00; font-weight: bold;");
+    console.log(`%c[Forwarder] Sending Accurate Ticket:\n${msg.trim()}`, "color: #00ff00; font-weight: bold;");
     GM_setValue(STORAGE_KEY, msg.trim());
 }
 
@@ -231,6 +223,6 @@ function handleWhatsAppInjection() {
 if (window.location.hostname.includes('whatsapp.com')) {
     handleWhatsAppInjection();
 } else {
-    console.log("%c[Forwarder] Restaurant-aware brand rules loaded!", "color: #00ffff; font-weight: bold;");
+    console.log("%c[Forwarder] Dual-Format Evaluation Fix Locked!", "color: #00ffff; font-weight: bold;");
     setInterval(scanDashboardLayout, 2000);
 }
