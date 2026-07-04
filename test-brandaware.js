@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Swiggy Zomato Order Forwarder (Restaurant-Aware Dual-Format Master Fix)
+// @name         Swiggy Zomato Order Forwarder (Brand-Aware Build)
 // @namespace    http://tampermonkey.net/
-// @version      2.8.1
-// @description  Simultaneously extract inline brackets/parentheses [X Pcs]/(X Pcs) and subscript text on both platforms.
+// @version      2.8.6
+// @description  Unified framework featuring explicit multi-brand isolation to protect specialized menu line names.
 // @author       Adrika
 // @match        *://*.partner.swiggy.com/*
 // @match        *://*.zomato.com/*
@@ -16,28 +16,28 @@ const STORAGE_KEY = "whatsapp_pending_order_msg";
 const PROCESSED_ORDERS = new Set();
 
 // =========================================================================
-// UNIFIED MERGING & CASING ENGINE
+// 🍳 CORE SANITIZATION & DYNAMIC CACHE AGGREGATION ENGINE
 // =========================================================================
-function compileAndMergeItems(rawItemsList) {
+function compileAndMergeItems(rawItemsList, isVyanjan) {
     const mergedMap = new Map();
 
     rawItemsList.forEach(item => {
         let cleanName = item.name.trim();
         let quantity = item.quantity;
 
-        // Strip brackets, parentheses, price metrics, and messy white spacing
+        // Strip structural brackets, item pricing parameters, and formatting debris
         cleanName = cleanName
             .replace(/\[[^\]]*\]/g, '')
             .replace(/\([^\)]*\)/g, '')
-            .replace(/₹\s*\d+/g, '')
+            .replace(/₹\s*\d+(\.\d{2})?/g, '') // Strips prices with decimal balances completely
             .replace(/\s+/g, ' ')
             .trim();
 
-        // Convert to crisp Title Case
+        // Standardize raw string contents to cohesive Title Case
         cleanName = cleanName.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
 
-        // Apply explicit keyword clubbing rule
-        if (/kachori|kochuri/i.test(cleanName)) {
+        // [BRAND CONTROLLER RULE]: Apply explicit global clubbing ONLY if this isn't a Vyanjan order
+        if (!isVyanjan && /kachori|kochuri/i.test(cleanName)) {
             cleanName = "Kachori Sabzi";
         }
 
@@ -58,17 +58,24 @@ function compileAndMergeItems(rawItemsList) {
 }
 
 // =========================================================================
-// UNIVERSAL DUAL-FORMAT CONTENT PARSERS
+// 🟥 INTERFACE 1: ZOMATO MERCHANT PORTAL PARSER
 // =========================================================================
 function parseZomatoCard(card) {
+    // Locate the sub-nested component element isolating the core numerical ID
     const idSpan = card.querySelector('div.css-16jdd3h span font-weight, [class*="sc-jzJRlG"]');
     if (!idSpan) return null;
 
     const orderId = idSpan.textContent.replace(/[^0-9]/g, '').trim();
     if (!orderId || orderId.length < 4 || PROCESSED_ORDERS.has(orderId)) return null;
 
+    // BRAND LOOKUP: Scan the explicit Zomato title field element container for Vyanjan confirmation
+    const brandHeader = card.querySelector('.css-1cyrfy9');
+    const isVyanjan = brandHeader ? /vyanjan/i.test(brandHeader.textContent) : false;
+
     const rawItems = [];
-    const itemRows = card.querySelectorAll('.css-1gq83dh, .css-pnn23e, .css-68hfpx, div[height="100%"]');
+
+    // Target ONLY the deep inner item lines to eliminate container double-scanning loops
+    const itemRows = card.querySelectorAll('.css-68hfpx');
 
     itemRows.forEach(row => {
         const nameEl = row.querySelector('.css-1mcri0u');
@@ -77,14 +84,15 @@ function parseZomatoCard(card) {
         if (nameEl && qtyEl) {
             let mainQty = parseInt(qtyEl.textContent.replace(/[^0-9]/g, '').trim(), 10) || 1;
             let rawName = nameEl.textContent.trim();
-
             let multiplierFound = 1;
 
-            // CHECK TYPE 1: Inline bracket/parentheses check rule
+            // ZOMATO MULTIPLIER FORMAT A: Embedded array text brackets (e.g. "[3 Pieces]")
             const inlineMatch = rawName.match(/[\[\(](\d+)\s*(?:pieces?|pcs?)[\]\)]/i);
-            // CHECK TYPE 2: Subscript context check rule
-            const fullRowText = row.closest('div')?.textContent || row.textContent || "";
-            const subscriptMatch = fullRowText.match(/Quantity:\s*(\d+)/i);
+
+            // ZOMATO MULTIPLIER FORMAT B: Climb up to the true absolute outer box parent block row to search for a custom quantity block
+            const outerRowBlock = row.closest('.css-1gq83dh') || row.closest('.css-pnn23e') || row.parentElement?.parentElement;
+            const subscriptEl = outerRowBlock ? outerRowBlock.querySelector('.css-dkoqby') : null;
+            const subscriptMatch = subscriptEl ? subscriptEl.textContent.match(/Quantity:\s*(\d+)/i) : null;
 
             if (inlineMatch) {
                 multiplierFound = parseInt(inlineMatch[1], 10);
@@ -94,16 +102,17 @@ function parseZomatoCard(card) {
 
             let finalCalculatedQty = mainQty * multiplierFound;
 
-            if (!rawItems.some(i => i.name === rawName && i.quantity === finalCalculatedQty)) {
-                rawItems.push({ name: rawName, quantity: finalCalculatedQty });
-            }
+            rawItems.push({ name: rawName, quantity: finalCalculatedQty });
         }
     });
 
-    const finalMergedItems = compileAndMergeItems(rawItems);
+    const finalMergedItems = compileAndMergeItems(rawItems, isVyanjan);
     return finalMergedItems.length > 0 ? { orderId, platform: 'zomato', items: finalMergedItems } : null;
 }
 
+// =========================================================================
+// 🟧 INTERFACE 2: SWIGGY PARTNER DASHBOARD PARSER
+// =========================================================================
 function parseSwiggyCard(card) {
     const idEl = card.querySelector('[data-testid="last_4_digits_order_number"]');
     if (!idEl) return null;
@@ -111,33 +120,48 @@ function parseSwiggyCard(card) {
     const orderId = idEl.textContent.replace(/[^0-9]/g, '').trim();
     if (!orderId || PROCESSED_ORDERS.has(orderId)) return null;
 
+    // BRAND LOOKUP: Scan the complete card data text context block for Vyanjan identification flags
+    const isVyanjan = /vyanjan/i.test(card.textContent);
+
     const rawItems = [];
     const nameElements = card.querySelectorAll('[data-testid="item_name"]');
 
     nameElements.forEach(nameEl => {
-        const rowContext = nameEl.closest('.css-g5y9jx');
+        // [SWIGGY GRID SAFEGUARD]: Trace upward until capturing BOTH left text and right multiplier boxes
+        let rowContext = nameEl.parentElement;
+        while (rowContext && !rowContext.textContent.includes('₹')) {
+            rowContext = rowContext.parentElement;
+        }
+        if (!rowContext) {
+            rowContext = nameEl.closest('.css-g5y9jx') || nameEl.parentElement?.parentElement;
+        }
+
         if (rowContext) {
-            const textContent = rowContext.textContent.replace(/\s+/g, ' ');
-            const qtyMatch = textContent.match(/x\s*(\d+)/i);
-            let quantity = qtyMatch ? parseInt(qtyMatch[1], 10) : 1;
+            // Flatten vertical line breaks to parse detached right-aligned containers smoothly
+            const fullRowText = rowContext.textContent.replace(/\s+/g, ' ').trim();
+
+            // SWIGGY MULTIPLIER FORMAT A: Remote alignment tracker metrics (e.g. "x 2")
+            const qtyMatch = fullRowText.match(/x\s*(\d+)/i) || fullRowText.match(/(\d+)\s*x/i);
+            let mainQuantity = qtyMatch ? parseInt(qtyMatch[1], 10) : 1;
+
             let rawName = nameEl.textContent.trim();
 
-            // CRITICAL FIX: Look for [8 Pieces], (8 Pcs), [4 pcs], etc.
+            // SWIGGY MULTIPLIER FORMAT B: Inline parenthetical portion scales (e.g. "(8 Pcs)")
             const inlineMatch = rawName.match(/[\[\(](\d+)\s*(?:pieces?|pcs?)[\]\)]/i);
             if (inlineMatch) {
-                quantity = quantity * parseInt(inlineMatch[1], 10);
+                mainQuantity = mainQuantity * parseInt(inlineMatch[1], 10);
             }
 
-            rawItems.push({ name: rawName, quantity: quantity });
+            rawItems.push({ name: rawName, quantity: mainQuantity });
         }
     });
 
-    const finalMergedItems = compileAndMergeItems(rawItems);
+    const finalMergedItems = compileAndMergeItems(rawItems, isVyanjan);
     return finalMergedItems.length > 0 ? { orderId, platform: 'swiggy', items: finalMergedItems } : null;
 }
 
 // =========================================================================
-// RUNTIME SCANNER ENGINE
+// 🌐 UNIFIED RUNTIME DISTRIBUTOR LOOP
 // =========================================================================
 function scanDashboardLayout() {
     const isSwiggy = window.location.hostname.includes('swiggy');
@@ -153,6 +177,7 @@ function scanDashboardLayout() {
         });
     } else {
         document.querySelectorAll('.css-eeodfr').forEach(card => {
+            // [QUEUE LOCK]: Only extract from active preparation pools; ignore transit flags
             if (card.textContent.includes('Order ready') && !card.textContent.includes('Delivering in')) {
                 const orderData = parseZomatoCard(card);
                 if (orderData) dispatchToWhatsApp(orderData);
@@ -171,12 +196,12 @@ function dispatchToWhatsApp(orderData) {
         msg += `${item.quantity} ${item.name}\n`;
     });
 
-    console.log(`%c[Forwarder] Sending Accurate Ticket:\n${msg.trim()}`, "color: #00ff00; font-weight: bold;");
+    console.log(`%c[Forwarder] Processing Order Token Live:\n${msg.trim()}`, "color: #00ff00; font-weight: bold;");
     GM_setValue(STORAGE_KEY, msg.trim());
 }
 
 // =========================================================================
-// WHATSAPP DISPATCH MODULE
+// 💬 WHATSAPP INJECTION DELIVERY SYSTEM
 // =========================================================================
 function handleWhatsAppInjection() {
     setInterval(() => {
@@ -193,7 +218,7 @@ function handleWhatsAppInjection() {
         }
 
         if (inputPane) {
-            GM_setValue(STORAGE_KEY, null);
+            GM_setValue(STORAGE_KEY, null); // Instantly drain the channel buffer
             inputPane.focus();
             document.execCommand('selectAll', false, null);
             document.execCommand('delete', false, null);
@@ -220,9 +245,12 @@ function handleWhatsAppInjection() {
     }, 1500);
 }
 
+// =========================================================================
+// INITIALIZATION ROUTER
+// =========================================================================
 if (window.location.hostname.includes('whatsapp.com')) {
     handleWhatsAppInjection();
 } else {
-    console.log("%c[Forwarder] Dual-Format Evaluation Fix Locked!", "color: #00ffff; font-weight: bold;");
+    console.log("%c[Forwarder] Unified Platform Scanner Initialized!", "color: #00ffff; font-weight: bold;");
     setInterval(scanDashboardLayout, 2000);
 }
